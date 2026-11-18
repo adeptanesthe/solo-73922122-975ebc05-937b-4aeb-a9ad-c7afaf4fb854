@@ -1,0 +1,11 @@
+services:
+  bm25:
+    build: .
+    image: bm25-maintenance:latest
+    container_name: bm25-maintenance
+    ports:
+      - "8000:8000"
+    environment:
+      # 演示慢建索引不挡查询时可调大(秒),默认 0
+      BM25_BUILD_DELAY: "0"
+    restart: unless-stopped
