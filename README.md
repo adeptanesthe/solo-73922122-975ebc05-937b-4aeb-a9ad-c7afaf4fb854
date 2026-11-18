@@ -1,7 +1,9 @@
-# 设备维修记录 BM25 精确检索
+# 设备维修记录 BM25 精确检索 + 实体抽取
 
 面向设备维护工程师的故障处理办法检索服务:FastAPI + NumPy 实现精确 BM25,
 正式检索使用 BlockMax WAND 块上界剪枝(不全量计分后排序),前 k 与穷举完全一致。
+另提供实体抽取接口:用几份人工圈出故障部件/处理动作的维修单训练字符级 BIO HMM,
+对其余记录预测同类区间。
 
 ## 快速启动
 
@@ -74,6 +76,49 @@ uvicorn app.main:app --port 8000
 全量计分后排序的对照接口,响应结构相同,`scored` 恒为全库篇数 N。
 用于核对正式检索的前 k 一致性,不是正式检索路径。
 
+### `POST /extract` — 实体抽取(字符级 BIO HMM)
+
+用 2~8 条人工标注样例训练加一平滑的字符级 BIO 隐马尔可夫模型,
+经合法转移的 Viterbi 解码,对 1~5 条现存记录预测实体区间:
+
+```json
+{
+  "train": [
+    {"id": "R0000", "spans": [{"start": 10, "end": 15, "label": "PART"},
+                              {"start": 16, "end": 21, "label": "ACTION"}]},
+    {"id": "R0003", "spans": [{"start": 7, "end": 11, "label": "PART"},
+                              {"start": 12, "end": 16, "label": "ACTION"}]}
+  ],
+  "targets": ["R0001", "R0004"]
+}
+```
+
+- 实体类型两类:`PART`=故障部件,`ACTION`=处理动作。
+- 区间为半开区间 `[start, end)`,按 Unicode 字符(码位)位置;同一记录的区间不得重叠。
+- 响应:`results` 按 `targets` 顺序(重复编号按首次出现去重),每项含记录编号 `id`、
+  受理时正文 `text` 和预测实体列表;实体含 `start`/`end`/`label` 及原文片段 `text`。
+
+```json
+{
+  "results": [
+    {"id": "R0001", "text": "5号车间风机出现液压泄漏,清洗油路后恢复正常。",
+     "entities": [{"start": 7, "end": 11, "label": "PART", "text": "液压泄漏"},
+                  {"start": 12, "end": 16, "label": "ACTION", "text": "清洗油路"}]}
+  ]
+}
+```
+
+模型与一致性约定:
+
+- 状态 `O / B-PART / I-PART / B-ACTION / I-ACTION`;初始、转移、发射计数全部加一平滑;
+  转移只在合法对之间(`I-X` 只能接在 `B-X`/`I-X` 之后,首字符不能是 `I-X`);
+  训练未出现的字符按 `<UNK>` 计(概率即平滑后的 `1/(N+V)`)。
+- 一次请求的训练与预测使用受理时同一版正文(同一状态快照);更正成功后的新请求按新正文计算;
+  失败更正(409/422)保留原状态,抽取结果不变;抽取为只读操作,不影响检索。
+- 编号缺失返回 `404`,区间越界/重叠/次序颠倒或样例数越界返回 `422`,均为整次拒绝,不产生部分结果。
+- 小样本字符级 HMM 的固有边界:训练样例中出现过的实体词(维修词表在记录间复用)能稳定抽取;
+  完全未见过的实体字符串可能被漏检。样例越典型、覆盖越广,效果越好。
+
 ### 其他
 
 - `GET /stats`:篇数、平均长度、词项数、BM25 参数。
@@ -90,7 +135,7 @@ uvicorn app.main:app --port 8000
 ## 验证
 
 ```bash
-python3 -m pytest tests/ -q     # 23 项单元/API/并发测试
+python3 -m pytest tests/ -q     # 49 项单元/API/并发/抽取测试
 python3 scripts/verify.py       # 穷举对照 + 随机回归 + 剪枝示例
 ```
 
@@ -107,10 +152,11 @@ python3 scripts/verify.py       # 穷举对照 + 随机回归 + 剪枝示例
 
 ```
 app/index.py      BM25 状态构建、BlockMax WAND、穷举对照、原子状态管理
+app/ner.py        字符级 BIO HMM:加一平滑训练、合法转移 Viterbi、区间校验
 app/main.py       FastAPI 应用与端点
 app/schemas.py    请求/响应模型
 data/corpus.json  本地示例语料(scripts/gen_corpus.py 生成,确定性种子)
 scripts/verify.py 穷举对照与剪枝效果验证
 scripts/load_corpus.py 向运行中的服务批量写入语料
-tests/            单元、API 与并发一致性测试
+tests/            单元、API、并发一致性与实体抽取测试
 ```
